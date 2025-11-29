@@ -1,8 +1,14 @@
 from langchain_core.tools import tool
+from shared_store import BASE64_STORE, url_time
+import time
+import os
 import requests
 import json
+from collections import defaultdict
 from typing import Any, Dict, Optional
 
+cache = defaultdict(int)
+retry_limit = 4
 @tool
 def post_request(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
     """
@@ -26,26 +32,75 @@ def post_request(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, 
         requests.HTTPError: If the server responds with an unsuccessful status.
         requests.RequestException: For network-related errors.
     """
+    # Handling if the answer is a BASE64
+    ans = payload.get("answer")
+
+    if isinstance(ans, str) and ans.startswith("BASE64_KEY:"):
+        key = ans.split(":", 1)[1]
+        payload["answer"] = BASE64_STORE[key]
+
+    # Make sure secret is present in payload
+    if "secret" not in payload or not payload["secret"]:
+        payload["secret"] = SECRET
+
     headers = headers or {"Content-Type": "application/json"}
+
     try:
-        print(f"\nSending Answer \n{json.dumps(payload, indent=4)}\n to url: {url}")
-        response = requests.post(url, json=payload, headers=headers)
+        # track attempts per quiz URL if you want
+        cur_url = payload.get("url") or os.getenv("url")
+        if cur_url:
+            cache[cur_url] = cache.get(cur_url, 0) + 1
+
+        sending = payload
+        # For logging: truncate long answers, but keep email/url/secret visible
+        if isinstance(payload.get("answer"), str):
+            sending = {
+                "answer": payload.get("answer", "")[:100],
+                "email": payload.get("email", ""),
+                "url": payload.get("url", ""),
+                "secret": payload.get("secret", ""),
+            }
+
+        print(f"\nSending Answer \n{json.dumps(sending, indent=4)}\n to url: {url}")
+
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        # (whatever you already do with response below stays the same)
+
+
 
         # Raise on 4xx/5xx
         response.raise_for_status()
 
         # Try to return JSON, fallback to raw text
         data = response.json()
-        delay = data.get("delay", 0)
-        delay = delay if isinstance(delay, (int, float)) else 0
-        correct = data.get("correct")
-        if not correct and delay < 180:
-            del data["url"]
-        if delay >= 180:
-            data = {
-                "url": data.get("url")
-            }
         print("Got the response: \n", json.dumps(data, indent=4), '\n')
+        
+        delay = time.time() - url_time.get(cur_url, time.time())
+        print(delay)
+        next_url = data.get("url") 
+        if not next_url:
+            return "Tasks completed"
+        if next_url not in url_time:
+            url_time[next_url] = time.time()
+
+        correct = data.get("correct")
+        if not correct:
+            cur_time = time.time()
+            prev = url_time.get(next_url, time.time())
+            if cache[cur_url] >= retry_limit or delay >= 180 or (prev != "0" and (cur_time - float(prev)) > 90): # Shouldn't retry
+                print("Not retrying, moving on to the next question")
+                data = {"url": data.get("url", "")} 
+            else: # Retry
+                os.environ["offset"] = str(url_time.get(next_url, time.time()))
+                print("Retrying..")
+                data["url"] = cur_url
+                data["message"] = "Retry Again!" 
+        print("Formatted: \n", json.dumps(data, indent=4), '\n')
+        forward_url = data.get("url", "")
+        os.environ["url"] = forward_url 
+        if forward_url == next_url:
+            os.environ["offset"] = "0"
+
         return data
     except requests.HTTPError as e:
         # Extract server’s error response

@@ -5,11 +5,7 @@ from dotenv import load_dotenv
 import os
 from google.genai import types
 load_dotenv()
-API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-if not API_KEY:
-    raise RuntimeError("Missing GOOGLE_API_KEY or GEMINI_API_KEY environment variable")
-
-client = genai.Client(api_key=API_KEY)
+client = genai.Client()
 
 def strip_code_fences(code: str) -> str:
     code = code.strip()
@@ -59,7 +55,10 @@ def run_code(code: str) -> dict:
             cwd="LLMFiles"
         )
         stdout, stderr = proc.communicate()
-
+        if len(stdout) >= 10000:
+            return stdout[:10000] + "...truncated due to large size"
+        if len(stderr) >= 10000:
+            return stderr[:10000] + "...truncated due to large size"
         # --- Step 4: Return everything ---
         return {
             "stdout": stdout,
